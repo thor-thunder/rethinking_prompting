@@ -1,26 +1,27 @@
 # Reproduce Prompt — A Single, Dataset-Agnostic Template
 
-A self-contained prompt template that replicates the empirical winner of this
-repository's study: **Chain-of-Thought (CoT) reasoning paired with majority
-voting over multiple samples**. The paper benchmarks 8 prompting strategies
-(DiP, CoT, L2M, SBP, AnP, ToT, S-RF, MAD) across 6 datasets and finds that
-once test-time compute is scaled via self-consistency, simple CoT — with the
-exact phrasing pattern used in `prompts/GSM8K.py` and `prompts/MATH.py` — wins
-or ties the best, while the orchestration-heavy strategies plateau.
+A self-contained prompt template that replicates this work's empirical
+winner: **Chain-of-Thought (CoT) reasoning paired with majority voting over
+multiple samples**. After benchmarking eight prompting strategies (direct,
+chain-of-thought, least-to-most, step-back, analogical, tree-of-thoughts,
+self-refine, multi-agent debate) across six reasoning datasets (grade-school
+math, harder grade-school math, competition math, graduate-level science
+Q&A, multi-task multiple choice, and AIME), the finding is that simple CoT
+wins or ties the best at scale once self-consistency is applied — heavier
+orchestrations spend extra tokens on intermediate planning that majority
+voting eventually subsumes.
 
-This prompt fuses:
+The template below fuses three elements into one prompt, with no external
+dependencies:
 
-- The CoT scaffold from `prompts/GSM8K.py:9` (`cot_pre`) and `prompts/GSM8K.py:11`
-  (`cot_0_shot`).
-- The `\boxed{...}` answer convention used uniformly across every dataset
-  module under `prompts/`.
-- A lightweight "name the relevant principles first" cue borrowed from the
-  Step-Back-Prompting templates at `prompts/GSM8K.py:126` (`SBP_extract`) and
-  `prompts/GSM8K.py:133` (`SBP_answer`) — kept inline so it costs no extra
+- The CoT scaffold: a short instruction, a `\boxed{...}` answer convention,
+  and the trigger phrase "Let's think step by step" before the answer slot.
+- A lightweight "name the relevant principles first" cue (the strongest
+  finding among the multi-step strategies), kept inline so it costs no extra
   round-trips.
 - An auto-detect rule for the answer format so the same template works for
-  numeric (GSM8K / GSM-Hard / AIME), mathematical-expression (MATH),
-  multiple-choice (MMLU / GPQA), and free-form short-answer questions.
+  numeric answers, mathematical expressions, multiple-choice letters, and
+  short free-form answers without needing per-dataset variants.
 
 ## The Prompt
 
@@ -50,33 +51,33 @@ Answer:
 ```
 
 `{exemplars}` is optional. If you have known-good worked examples for the
-target dataset (e.g. the 5 worked GSM8K problems in `prompts/GSM8K.py:28` or
-the 5 MATH problems in `prompts/MATH.py:28`), paste them in front of the
-question in the same `Question: ... \nAnswer: ...` format; the few-shot
-templates in this repo show this is a strict accuracy-positive change for
-hard datasets. Leave it empty otherwise.
+target domain, paste them in front of the question in the same
+`Question: ... \nAnswer: ...` format, ending each example's answer with its
+own `\boxed{...}`. Few-shot exemplars are an accuracy-positive change for
+hard datasets; leave the slot empty otherwise.
 
-## How to use it (mirrors `main.py` + `eval_csv_N.py`)
+## How to use it
 
-1. Substitute the question into `{question}` (and optionally drop in
-   `{exemplars}`). Send the resulting string to your LLM.
-2. Sample the model **N times** with a non-zero temperature — the repo uses
-   `temperature ≈ 0.7` and N up to 16 in `eval_csv_N.py`. Each sample is an
-   independent rollout.
-3. Parse each response with the `\boxed{...}` extractor (see
-   `dataset.py:622` `parse_answer` and the `last_boxed_only_string` helper for
-   reference logic).
-4. Take the **mode** of the extracted answers — that is the majority-vote
-   prediction. Per the paper's central result, this curve dominates the
-   curves of ToT / MAD / AnP at the same N for CoT.
+1. Substitute the question into `{question}` (and optionally drop one to
+   five worked examples into `{exemplars}`). Send the resulting string to
+   your LLM as a single user message.
+2. Sample the model **N times** with a non-zero temperature — temperature
+   around 0.7 and N up to 16 is a good operating point. Each sample is an
+   independent rollout; do not condition later samples on earlier ones.
+3. From each response, extract the contents of the *last* `\boxed{...}`
+   that appears in the text. Strip whitespace and surrounding `$...$` if
+   present. Treat that string as the candidate answer for that sample.
+4. Take the **mode** of the N candidate answers (majority vote, ties broken
+   arbitrarily). Output that as the final prediction. Sampling more, then
+   voting, is what makes plain CoT competitive with — and usually better
+   than — heavier prompting strategies.
 
 ## Why this template, and not one of the more elaborate strategies
 
-The repository's own `eval_csv_N.py` and `eval_csv_cost.py` curves show that
-CoT and DiP are Pareto-optimal in (accuracy, samples) and (accuracy, dollars)
-across all six benchmarks once N ≥ ~4. ToT, MAD and the analogical-prompting
-variants spend extra tokens on intermediate orchestration that majority
-voting eventually subsumes. The template above keeps the proven CoT spine
-and adds only the lightest principle-first cue from SBP — which the paper
-finds is the best of the multi-step strategies — without any extra
-generation rounds.
+Tree-of-thoughts, multi-agent debate, and analogical-prompting variants
+spend extra tokens on intermediate orchestration: branching candidate
+solutions, simulating critics, or generating analogous problems before the
+real one. Once you sample plain CoT N times and take the majority vote,
+those orchestrations no longer add accuracy worth their cost — the curves
+flatten or cross. The template above keeps the proven CoT spine and adds
+only the lightest principle-first cue, without any extra generation rounds.
