@@ -17,13 +17,197 @@ The inference pipeline is orchestrated through:
 3. **model.py** → LLM inference backend abstraction (vllm, OpenAI, Gemini)
 
 ### Data Flow
+
+The inference pipeline follows a carefully architected multi-stage process that transforms raw command-line arguments into statistically robust predictions through iterative model sampling and ensemble voting. Let us break down each stage in comprehensive detail:
+
+#### Stage 1: Argument Parsing & Configuration
+The pipeline begins when command-line arguments are parsed and consolidated into an `args` object. This object serves as the configuration carrier throughout the entire inference pipeline, containing critical parameters such as:
+- **Model Configuration**: `model_name`, `model_type` (vllm/openai/gemini), and model-specific settings
+- **Dataset Selection**: `dataset` (GSM8K/MATH/GPQA/MMLU/AIME/GSM-Hard) and `split` (train/test)
+- **Reasoning Strategy**: `reasoning` strategy choice (DiP/CoT/L2M/SBP/AnP/S-RF/ToT/MAD) which fundamentally determines control flow
+- **Sampling Parameters**: `num` (number of samples for majority voting), `shot` (few-shot exemplar count)
+- **Execution Parameters**: `batchsize`, `max_num_workers`, `range_begin`, `range_end` for dataset slicing
+- **API Credentials**: `openai_api_key`, `openai_base_url`, `gemini_api_key` depending on backend
+
+#### Stage 2: Prompt Creation & Template Instantiation
+The `create_prompt(args)` function orchestrates dataset-specific prompt engineering by:
+1. **Loading Dataset Questions**: Retrieving the subset of questions from `read_dataset(args)` corresponding to the range specified in `range_begin:range_end`
+2. **Selecting Template Strategy**: Based on `args.reasoning`, the function selects the appropriate prompt template architecture:
+   - **DiP (Direct Prompting)**: Uses `directly_answer` template—minimal scaffolding, direct instruction
+   - **CoT (Chain-of-Thought)**: Uses `cot_0_shot` or `cot_1_shot` templates with structured step-by-step reasoning frameworks
+   - **L2M (Least-to-Most)**: Constructs decomposition prompts that break problems into prerequisite sub-problems
+   - **SBP (Step-Back Prompting)**: Generates abstraction prompts asking "What are the underlying principles?"
+   - **AnP (Analogous Prompting)**: Constructs analogy-based prompts drawing parallels to similar solved problems
+   - **S-RF (Self-Refine)**: Uses iterative feedback→refinement cycles requiring special message list construction
+   - **ToT (Tree of Thoughts)**: Generates evaluation and exploration prompts for tree search
+   - **MAD (Multi-Agent Debate)**: Constructs debate prompts with multiple viewpoint directives
+3. **Exemplar Injection**: If `shot=1`, the function injects few-shot exemplars into the `{exemplars}` placeholder within the template string
+4. **Answer Format Specification**: Embeds dataset-specific answer format instructions (e.g., `\boxed{...}` for mathematical reasoning tasks, or capital letter A/B/C/D for multiple-choice)
+5. **Dataset-Specific Adaptations**: Applies special formatting rules:
+   - **GSM8K**: Emphasizes numerical answer extraction with decimal precision
+   - **MATH**: Expects symbolic mathematical expressions in boxed notation
+   - **GPQA**: Shuffles multiple-choice options and specifies capital letter output
+   - **MMLU**: Specifies exact output sentence format: "The correct answer is X"
+   - **AIME**: Expects integer numerical results in boxed form
+   - **GSM-Hard**: Explicitly permits negative and non-sensical results despite semantic implausibility
+6. **Question Substitution**: Replaces `{question}` placeholder with actual question text from dataset
+7. **Output**: Returns a list of fully instantiated prompt strings, one per question in the range
+
+#### Stage 3: Message Format Conversion & Backend Adaptation
+The `get_messages(args)` function performs critical backend-specific message formatting by:
+1. **Checking Backend Type**: Determines whether the target is `openai`/compatible (standard JSON message format) or `gemini` (proprietary message format)
+2. **For OpenAI-Compatible Backends**:
+   - Converts string prompts to message dictionaries with role/content pairs
+   - If `args.system` is provided, adds system prompt as first message with role="system"
+   - Alternates user/assistant roles based on message sequence position (supporting multi-turn conversations)
+   - Creates structure: `[{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]`
+3. **For Gemini Backend**:
+   - Uses proprietary format with role="user"/"model" (not "user"/"assistant")
+   - Message content wrapped in `{"parts": [message]}` structure
+   - Omits system prompt from message list (passed separately to API)
+4. **Handling Iterative Strategies**: For strategies like S-RF that build conversation history:
+   - Maintains `args.messages` as list of message sequences
+   - Appends feedback prompts and refinement directives to conversation history
+   - Each iteration extends the conversation with new user turns and assistant responses
+5. **Output**: Returns backend-compatible message list structure ready for API/model consumption
+
+#### Stage 4: Model Inference & Token Generation
+The `LLM_generate(args)` function executes actual model inference through the appropriate backend:
+
+**For VLLM Backend (Local Models)**:
+- Initializes persistent vLLM engine connection (pooled across batch)
+- For each message sequence in the batch:
+  - Sends complete message history through `engine.generate()` with sampling parameters
+  - Generates `args.num` independent samples per question (using `num_return_sequences`)
+  - Collects raw text outputs with token-level metadata
+  - Records completion time and token usage statistics
+- Returns list of records: each record contains `{"output": str, "usage": {...}}`
+
+**For OpenAI Backend (API)**:
+- Authenticates using `OPENAI_API_KEY` environment variable or `--openai_api_key` argument
+- Constructs API request with:
+  - Complete message list from Stage 3
+  - `n=args.num` (number of independent completions to generate)
+  - Temperature settings (typically ~0.7 for sampling variety, 0 for deterministic)
+  - Top-p/top-k nucleus sampling parameters
+  - Max tokens guidance
+- Handles rate limiting and retry logic with exponential backoff
+- Extracts responses from API return object
+- Calculates token usage from `usage.prompt_tokens` and `usage.completion_tokens`
+- Returns records with metadata about token consumption and latency
+
+**For Gemini Backend (Google API)**:
+- Authenticates using `GOOGLE_API_KEY`
+- Calls `GenerativeModel.generate_content()` with safety settings configured
+- Requests multiple candidates via `generation_config` parameter
+- Handles candidate filtering (only counts successfully completed generations with finish_reason=1)
+- Implements retry loops for rate limiting and transient failures
+- Post-processes token counts using `.count_tokens()` API
+- Returns records including usage and timing information
+
+**For Iterative Strategies (S-RF, ToT, MAD)**:
+- Executes multiple inference rounds in sequence
+- Each round appends new messages to conversation history
+- Subsequent inferences use complete message history (context accumulation)
+- S-RF: feedback→improvement→feedback cycle requiring 2-3 inference calls per question
+- ToT: multiple expansion steps followed by evaluation step to guide tree search
+- MAD: parallel agent generations followed by debate round
+
+#### Stage 5: Answer Extraction & Standardization
+The `parse_answer(output)` function extracts structured answers from unstructured model outputs by:
+
+**For Mathematical Reasoning Tasks (GSM8K, MATH, AIME)**:
+- Uses regex pattern to locate `\boxed{...}` notation: `\boxed{([^}]*)}`
+- Extracts content between curly braces
+- For numerical comparison: removes all non-numeric characters and converts to float
+- Tolerates formatting variations: `\boxed{3.14}`, `\boxed{\frac{22}{7}}`, etc.
+- Returns extracted mathematical expression or numerical value
+
+**For Multiple-Choice Tasks (GPQA, MMLU)**:
+- Scans for capital letters A, B, C, or D in the output
+- Uses heuristics to find the final stated answer (often at end of response)
+- Handles phrases like "The correct answer is A" or standalone letter mentions
+- Returns single capital letter as answer
+
+**For GSM-Hard (Mathematical with Edge Cases)**:
+- Same extraction as GSM8K but accepts negative numbers and unusual results
+- Does not reject outputs based on semantic reasonableness
+- Preserves decimal precision for accurate comparison
+
+**For Unstructured Answers**:
+- Falls back to extracting the most recently mentioned answer-like token
+- Returns None if no structured answer detected
+
+#### Stage 6: Majority Voting & Result Aggregation
+After collecting `args.num` independent samples per question, the system performs ensemble aggregation:
+
+1. **Answer Frequency Analysis**:
+   - Counts occurrence frequency of each unique answer across the `num` samples
+   - Uses Python `Counter` data structure for efficient frequency calculation
+   - Handles None/null answers (filtered out before voting)
+
+2. **Mode Selection**:
+   - Identifies the answer(s) with maximum frequency (could be ties)
+   - Uses `find_most_common_elements()` to find all tied maximum-frequency answers
+   - Returns `(most_common_elements_list, max_count)` tuple
+
+3. **Tie-Breaking**:
+   - If multiple answers tie for maximum frequency, randomly selects one
+   - Ensures deterministic behavior across runs through seeding when desired
+   - Uses `get_unique_most_common_answer()` for single-answer output
+
+4. **Accuracy Comparison**:
+   - Extracted answer compared against ground truth using `examine_output()`
+   - Numerical tasks: float comparison with tolerance of 1e-4
+   - Multiple-choice: exact letter matching
+   - Returns binary correct/incorrect classification
+
+5. **Aggregation Across Dataset**:
+   - Accumulates accuracy scores across all questions
+   - Calculates `accuracy = correct_count / total_count`
+   - Records per-question metadata: answer, confidence (max_count/num), tokens used
+
+6. **Output**:
+   - Returns comprehensive record structure with predictions, confidences, and token statistics
+   - Enables downstream analysis of scaling behavior and strategy performance
+
+#### Complete Pipeline Visualization
 ```
-args → create_prompt(args) → [question strings]
-     → get_messages(args) → [message dicts for API]
-     → LLM_generate(args) → [model outputs with tokens]
-     → parse_answer(output) → [extracted answers]
-     → majority voting → final answer
+args (model, dataset, strategy, num=N)
+  ↓
+[Q1, Q2, ..., Qn] ← read_dataset()
+  ↓
+create_prompt(args) → [prompt_1, ..., prompt_n]
+  ↓
+get_messages(args) → [msgs_1, ..., msgs_n] (backend-adapted)
+  ↓
+LLM_generate(args) → [[output_1_1, ..., output_1_N],    ← N samples per question
+                       [output_2_1, ..., output_2_N],
+                       ...
+                       [output_n_1, ..., output_n_N]]
+  ↓
+parse_answer() → [[ans_1_1, ..., ans_1_N],
+                   [ans_2_1, ..., ans_2_N],
+                   ...
+                   [ans_n_1, ..., ans_n_N]]
+  ↓
+majority_voting() → [ans_1_mode, ans_2_mode, ..., ans_n_mode]
+  ↓
+examine_output(ans_i, ground_truth_i) → [correct_1, correct_2, ..., correct_n]
+  ↓
+accuracy = sum(correct_i) / n
 ```
+
+#### Token Accounting Throughout Pipeline
+Each stage consumes and produces tokens according to its computation:
+- **Stage 2 (Prompt Creation)**: Minimal tokens (prompt assembly, no model calls)
+- **Stage 3 (Message Formatting)**: No additional tokens (data structure conversion)
+- **Stage 4 (Inference)**: **Maximum token consumption** (~num × tokens_per_sample)
+  - If `num=16` and average response is 500 tokens: 16 × (prompt_tokens + 500 completion_tokens)
+- **Stage 5 (Extraction)**: No model tokens (regex/parsing only)
+- **Stage 6 (Voting)**: No model tokens (ensemble aggregation only)
+
+Total token budget ≈ `num_questions × num_samples × average_tokens_per_sample × 2` (prompt + completion)
 
 ### Prompt System
 Dataset-specific prompts are defined in `prompts/{DATASET}.py`. Each dataset module exports:
