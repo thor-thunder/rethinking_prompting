@@ -1,183 +1,302 @@
 ---
-name: rethinking-prompting-with-atomic-agents
-description: Build agentic prompting-strategy experiments in this repo using the atomic-agents framework. Use this skill whenever a task involves authoring a new prompting strategy (CoT, DiP, L2M, SBP, AnP, ToT, S-RF, MAD), wrapping the existing model/dataset pipeline behind a typed agent, or wiring an atomic-agents BaseAgent/BaseTool around the CoT + majority-voting workflow described in PROMPT.md.
+name: atomic-agents
+description: Build LLM apps with the atomic-agents Python framework (BrainBlend-AI) — single-responsibility AtomicAgents with Pydantic input/output schemas, explicit orchestration in plain Python, and tools that never auto-invoke. Use this skill whenever the user wants to build a chatbot, multi-agent pipeline, RAG bot, MCP client, or any agentic LLM workflow with atomic-agents, or asks you to wrap an existing prompt/strategy (e.g. CoT, ToT, Self-Refine, Multi-Agent Debate) as a typed agent.
 ---
 
-# Rethinking Prompting × atomic-agents
+# atomic-agents
 
-This repository accompanies the ACL 2025 paper *"Rethinking the Role of Prompting Strategies in LLM Test-Time Scaling"*. The codebase already implements 8 prompting strategies, 6 datasets, and 6 LLM backends in plain Python (`main.py`, `model.py`, `dataset.py`, `prompts/`). This skill explains how to layer **atomic-agents** on top of that code so new experiments can be expressed as typed, composable agents instead of ad-hoc scripts.
+## What this is
 
-Treat atomic-agents as **the** abstraction for any new agentic component added to this repo. Do **not** invent parallel agent/tool base classes.
+[atomic-agents](https://github.com/BrainBlend-AI/atomic-agents) is a small, opinionated framework for building agentic LLM applications by **composing single-purpose pieces** — agents, tools, and context providers — each with explicit Pydantic input/output schemas. It is built on top of [Instructor](https://github.com/instructor-ai/instructor) and Pydantic.
 
-## 1. Install (already done in this branch)
+The maintainers position it against LangChain / CrewAI / AutoGen:
+
+> While existing frameworks for agentic AI focus on building autonomous multi-agent systems, they often lack the control and predictability required for real-world applications.
+
+Four values drive every design choice: **modularity, predictability, extensibility, control**. The LEGO-block metaphor is theirs — and worth taking literally when writing code.
+
+Docs root: <https://brainblend-ai.github.io/atomic-agents/>
+
+## Version reality (read this first)
+
+| Track | API names | Python | Installable here? |
+| --- | --- | --- | --- |
+| **v2.x (current docs)** | `AtomicAgent`, `AgentConfig`, `ChatHistory`, `fetch_mcp_tools_async` | **3.12+** | Only on Python 3.12+ |
+| **v1.1.x (legacy, pinned in `requirements.txt` of this repo)** | `BaseAgent`, `BaseAgentConfig`, `AgentMemory`, `MCPToolFactory` | 3.11 OK | Yes (this env is 3.11) |
+
+The whole skill below is written against **v2** because that is what the docs teach and what `pip install atomic-agents` returns on Python 3.12+. If you are stuck on Python 3.11 (as this repo's `conda` env is), apply the v1 translation table at the bottom of the file before running any snippet.
 
 ```bash
-pip install atomic-agents
+pip install atomic-agents          # v2.x on Py 3.12+, v1.1.11 on Py 3.11
 ```
 
-`atomic-agents==1.1.11` is pinned in `requirements.txt`. It pulls in `instructor`, `pydantic>=2`, `openai`, and `mcp` automatically.
+## The five atoms
 
-## 2. Mental model
-
-atomic-agents has four atoms. Learn these before writing code:
-
-| Atom | File | Purpose |
+| Atom | Import | Job |
 | --- | --- | --- |
-| `BaseIOSchema` | `atomic_agents.lib.base.base_io_schema` | Pydantic model for every agent/tool input & output. **Must** have a non-empty docstring — the class enforces it. |
-| `SystemPromptGenerator` | `atomic_agents.lib.components.system_prompt_generator` | Composes a system prompt from `background`, `steps`, `output_instructions`, and optional `context_providers`. |
-| `AgentMemory` | `atomic_agents.lib.components.agent_memory` | Stores chat history for multi-turn / iterative strategies (ToT, S-RF, MAD). |
-| `BaseAgent` / `BaseAgentConfig` | `atomic_agents.agents.base_agent` | The runnable unit. Holds an `instructor`-wrapped client, model id, memory, prompt generator, and input/output schemas. Call `agent.run(input)` (sync) or `agent.run_async(input)` (streaming). |
-| `BaseTool` | `atomic_agents.lib.base.base_tool` | Wrap a callable as `input_schema → run(params) → output_schema` so it can be exposed to an agent. |
+| **Schema** | `from atomic_agents import BaseIOSchema` | A Pydantic model with a **required non-empty docstring**. Used for every agent/tool input and output. |
+| **SystemPromptGenerator** | `from atomic_agents.context import SystemPromptGenerator` | Composes the system prompt from three lists — `background`, `steps`, `output_instructions` — plus optional context providers. Don't hardcode prompt strings. |
+| **ChatHistory** | `from atomic_agents.context import ChatHistory` | Multi-turn memory. One per agent, or share across agents to fan-in conversation state. |
+| **AtomicAgent** | `from atomic_agents import AtomicAgent, AgentConfig` | The runnable. Generic-typed on its input and output schemas: `AtomicAgent[InputSchema, OutputSchema]`. |
+| **BaseTool** | `from atomic_agents import BaseTool, BaseToolConfig` | `input_schema → run(params) → output_schema`. **Never auto-invoked by an agent** — see the Tools section. |
 
-The runtime contract is: **typed input → system prompt (built from generator + memory) → instructor-validated output**. Stick to this — do not hand-format prompt strings around it.
+If a request can be expressed with these five, do not pull in LangChain / CrewAI / LangGraph alongside. The whole point is the small surface area.
 
-## 3. Repo-specific guidance
-
-### 3.1 Prompting strategies are first-class
-
-The paper's central empirical claim is that, under majority voting, simple **CoT** and **DiP** beat complex strategies as sampling scales. When you implement a new strategy as an atomic-agents agent:
-
-- **Default to CoT + majority voting** (the template in `PROMPT.md`) unless the user explicitly asks for ToT / S-RF / MAD. Don't add multi-agent debate or tree branching to "improve" a task — the paper shows it usually hurts at scale.
-- Sample N=16 with temperature ≈ 0.7, then majority-vote the `\boxed{...}` answers. Keep this loop outside the agent (in the caller), not inside the schema.
-- Strategy names used elsewhere in the codebase: `DiP`, `CoT`, `L2M`, `SBP`, `AnP`, `ToT`, `S-RF`, `MAD`. Reuse those identifiers.
-
-### 3.2 Map the existing pipeline onto atomic atoms
-
-| Repo concept | atomic-agents equivalent |
-| --- | --- |
-| `prompts/*.py` strategy templates | `SystemPromptGenerator(background=..., steps=..., output_instructions=...)` |
-| `model.py` LLM wrapper | the `instructor`-wrapped `client` passed into `BaseAgentConfig` |
-| `dataset.py` row → question | a `BaseIOSchema` subclass (e.g. `QuestionInputSchema`) |
-| `\boxed{answer}` extraction | a field on the output schema (e.g. `final_answer: str`) plus optional `reasoning: str` |
-| Iterative strategies (ToT, S-RF, MAD) | multiple `BaseAgent`s composed in Python, sharing or branching `AgentMemory` |
-| Majority voting in `eval_csv_*.py` | caller-side aggregation over N `agent.run(...)` calls |
-
-### 3.3 Canonical agent skeleton for this repo
-
-Use this shape for every new strategy. Adapt names, keep the structure:
+## Hello world (canonical, from the v2 quickstart)
 
 ```python
-import instructor
-from openai import OpenAI
+import os, instructor, openai
+from atomic_agents import AtomicAgent, AgentConfig, BasicChatInputSchema, BasicChatOutputSchema
+from atomic_agents.context import ChatHistory
+
+history = ChatHistory()
+client = instructor.from_openai(openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
+
+agent = AtomicAgent[BasicChatInputSchema, BasicChatOutputSchema](
+    config=AgentConfig(client=client, model="gpt-5-mini", history=history)
+)
+
+reply = agent.run(BasicChatInputSchema(chat_message="hi"))
+print(reply.chat_message)
+```
+
+Two idioms to internalize from this snippet:
+
+1. **Generic-type the agent class** — `AtomicAgent[InputSchema, OutputSchema](...)`. Do not pass schemas via `AgentConfig(input_schema=..., output_schema=...)`; that was the v1 idiom and is now discouraged.
+2. **Always pass a schema instance to `.run()`** — never a raw string.
+
+Quickstart files to read in order: `atomic-examples/quickstart/1_0_basic_chatbot.py` → `4_basic_chatbot_different_providers.py`.
+
+## Custom schemas + SystemPromptGenerator
+
+This is the shape you reach for once you outgrow the basic chat schemas:
+
+```python
 from pydantic import Field
-from atomic_agents.agents.base_agent import BaseAgent, BaseAgentConfig
-from atomic_agents.lib.base.base_io_schema import BaseIOSchema
-from atomic_agents.lib.components.system_prompt_generator import SystemPromptGenerator
+from atomic_agents import AtomicAgent, AgentConfig, BaseIOSchema
+from atomic_agents.context import SystemPromptGenerator, ChatHistory
 
+class QuestionInput(BaseIOSchema):
+    """A single reasoning question to be answered with CoT."""
+    question: str = Field(..., description="The problem statement.")
 
-class QuestionInputSchema(BaseIOSchema):
-    """A single reasoning question to be answered with CoT + boxed final answer."""
-    question: str = Field(..., description="The problem statement to solve.")
-    exemplars: str | None = Field(default=None, description="Optional few-shot block (Q/A pairs) prepended to the prompt.")
-
-
-class CoTAnswerSchema(BaseIOSchema):
+class CoTOutput(BaseIOSchema):
     """Chain-of-thought reasoning followed by the final boxed answer."""
     key_principles: str = Field(..., description="One or two lines naming the concepts the question tests.")
     reasoning: str = Field(..., description="Step-by-step derivation.")
-    final_answer: str = Field(..., description="The content that goes inside \\boxed{...} — number, expression, letter, or short string.")
+    final_answer: str = Field(..., description="The content that goes inside \\boxed{...}.")
 
+prompt = SystemPromptGenerator(
+    background=[
+        "You answer reasoning questions using Chain-of-Thought.",
+        "Your final answer always appears inside \\boxed{...}.",
+    ],
+    steps=[
+        "Identify the key concepts the question tests.",
+        "Solve the problem step by step.",
+        "Double-check the result and emit the boxed answer.",
+    ],
+    output_instructions=[
+        "Pick the box format from the question type: number, expression, single capital letter, or shortest unambiguous string.",
+    ],
+)
 
-def build_cot_agent(model: str = "gpt-4o-mini", api_key: str | None = None) -> BaseAgent:
-    client = instructor.from_openai(OpenAI(api_key=api_key))
-    prompt = SystemPromptGenerator(
-        background=[
-            "You answer reasoning questions using Chain-of-Thought.",
-            "Your final answer always appears inside \\boxed{...}.",
-        ],
-        steps=[
-            "Identify the key concepts the question tests.",
-            "Solve the problem step by step.",
-            "Double-check the result and emit the boxed answer.",
-        ],
-        output_instructions=[
-            "Pick the \\boxed{...} format from the question type: number, expression, single capital letter, or shortest unambiguous string.",
-        ],
-    )
-    return BaseAgent(BaseAgentConfig(
-        client=client,
-        model=model,
-        system_prompt_generator=prompt,
-        input_schema=QuestionInputSchema,
-        output_schema=CoTAnswerSchema,
-        model_api_parameters={"temperature": 0.7},
-    ))
+agent = AtomicAgent[QuestionInput, CoTOutput](
+    config=AgentConfig(client=client, model="gpt-5-mini",
+                       history=ChatHistory(), system_prompt_generator=prompt)
+)
 ```
 
-Majority voting stays in the caller:
+`BaseIOSchema._validate_description` will raise `ValueError` at class-definition time if you forget the docstring. That's a feature — every schema doubles as LLM-visible documentation.
+
+## Orchestration: five named patterns, all plain Python
+
+Source: <https://brainblend-ai.github.io/atomic-agents/guides/orchestration.html>. There is **no `Orchestrator` class** — the framework deliberately leaves control flow to you. Pick a pattern and write the loop in `main.py`.
+
+### 1. Sequential pipeline (schema chaining)
+Agent A's output schema **is** agent B's input schema. That's the whole mechanism.
 
 ```python
-from collections import Counter
+classify_agent = AtomicAgent[Question, Classification](...)
+solve_agent    = AtomicAgent[Classification, Solution](...)
 
-agent = build_cot_agent()
-samples = [agent.run(QuestionInputSchema(question=q)).final_answer for _ in range(16)]
-predicted = Counter(samples).most_common(1)[0][0]
+classification = classify_agent.run(Question(text=q))
+solution       = solve_agent.run(classification)
 ```
 
-### 3.4 When you need an iterative strategy
+Canonical example: `atomic-examples/deep-research/` — a `ResearchState` object is threaded through several single-responsibility agents in a plain Python loop.
 
-- **Self-Refine (S-RF):** two agents — `Drafter` and `Critic` — share an `AgentMemory`. Loop until the critic returns `done=True` on its output schema.
-- **Multi-Agent Debate (MAD):** N independent agents (each its own `AgentMemory`), then a `Judge` agent whose input schema lists their answers.
-- **Tree of Thoughts (ToT):** an `Expander` agent that returns `next_thoughts: list[str]` plus an `Evaluator` agent. Branch in Python — do **not** try to encode tree state in a single prompt.
-
-For every iterative strategy, prefer many small agents with narrow schemas over one big agent doing everything. That is the whole point of "atomic" agents.
-
-### 3.5 Tools (only when you actually need them)
-
-If a strategy needs a calculator, code executor, or retrieval step, wrap it as a `BaseTool`:
+### 2. Tool orchestration / choice agent (`Union` output)
+Let the agent pick which downstream tool to call by emitting a discriminated-union output:
 
 ```python
-from atomic_agents.lib.base.base_tool import BaseTool, BaseToolConfig
+class AgentChoice(BaseIOSchema):
+    """Decision about which tool to invoke."""
+    tool_parameters: SearchTool.input_schema | CalculatorTool.input_schema
 
-class CalculatorInputSchema(BaseIOSchema):
+choice = router.run(user_query)
+if isinstance(choice.tool_parameters, SearchTool.input_schema):
+    result = search_tool.run(choice.tool_parameters)
+else:
+    result = calculator_tool.run(choice.tool_parameters)
+```
+
+Canonical example: `atomic-examples/orchestration-agent/`.
+
+### 3. Router (classifier + dispatch table)
+Classifier agent outputs `category: Literal["math", "code", "trivia"]`; the dispatcher picks the worker agent.
+
+### 4. Parallel execution
+Plain `asyncio.gather` over `run_async`:
+
+```python
+a, b = await asyncio.gather(agent_a.run_async(x), agent_b.run_async(y))
+```
+
+### 5. Supervisor / critic loop
+A validator agent loops on the worker's output until it emits `approved=True`. This is the atomic-agents idiom for Self-Refine.
+
+> Every agent has a single responsibility and reads/contributes to a shared state object. The loop itself lives in `main.py` as plain Python — no megagent, no hidden control flow.
+> — *deep-research example README*
+
+## Tools — they never auto-invoke
+
+From the Tools guide, verbatim:
+
+> There is no `tools=[...]` argument anywhere in the framework, and that is intentional. You decide when to call it.
+
+Two recommended patterns:
+
+**A. Direct call** — agent's output schema *is* the tool's input schema:
+```python
+tool_input = agent.run(user_query)        # output schema matches tool input
+tool_result = tool.run(tool_input)
+```
+
+**B. Choice agent** — as shown in pattern 2 above.
+
+The pre-built tool registry is **Atomic Forge**: tools are downloaded into your repo via the CLI rather than imported from a black-box package — same philosophy of control.
+
+Implement a custom tool exactly like an agent's I/O contract:
+
+```python
+from atomic_agents import BaseTool, BaseToolConfig, BaseIOSchema
+
+class CalcIn(BaseIOSchema):
     """A pure arithmetic expression to evaluate."""
     expression: str = Field(..., description="A safe Python arithmetic expression.")
 
-class CalculatorOutputSchema(BaseIOSchema):
+class CalcOut(BaseIOSchema):
     """Result of evaluating the expression."""
     value: float = Field(..., description="Numeric result.")
 
 class Calculator(BaseTool):
-    input_schema = CalculatorInputSchema
-    output_schema = CalculatorOutputSchema
-    def run(self, params: CalculatorInputSchema) -> CalculatorOutputSchema:
-        return CalculatorOutputSchema(value=float(eval(params.expression, {"__builtins__": {}})))
+    input_schema = CalcIn
+    output_schema = CalcOut
+    def run(self, params: CalcIn) -> CalcOut:
+        return CalcOut(value=float(eval(params.expression, {"__builtins__": {}})))
 ```
 
-Don't add tools speculatively — the paper's headline finding is that complexity hurts. Add a tool only when the dataset requires it.
+## Context providers (dynamic system-prompt injection)
 
-## 4. Working rules in this repo
-
-These rules apply to any Claude session in this directory:
-
-- **Editing files:** prefer `Edit` over `Write`. Never create new top-level Python modules when a small change to `main.py` / `model.py` / `dataset.py` suffices.
-- **Don't reinvent prompts:** the canonical CoT scaffold lives in `PROMPT.md`. New agents should mirror its three-step structure (principles → reasoning → boxed answer) inside `SystemPromptGenerator`.
-- **Schemas must have docstrings.** `BaseIOSchema.__pydantic_init_subclass__` raises `ValueError` otherwise.
-- **Don't hard-code API keys.** Read `openai_api_key`, `openai_base_url`, `google_api_key`, `hf_token` from env or the existing config sites in `main.py` / `dataset.py`.
-- **Determinism vs. scaling:** when reproducing paper numbers, sample with `temperature=0.7`, N=16, and majority-vote in the caller. When debugging a single trace, set `temperature=0` and N=1.
-- **No emojis in code or commits.** Markdown badges in `readme.md` stay as-is.
-- **Comments:** only for non-obvious *why*. The schema docstrings already explain *what*.
-- **Tests / smoke checks:** if you change agent wiring, run a one-shot `agent.run(QuestionInputSchema(question="2+2=?"))` against a cheap model before declaring the change done.
-
-## 5. Quick reference
+For data that varies per turn — current date, retrieved RAG chunks, user profile — subclass `BaseDynamicContextProvider` and register it with the agent:
 
 ```python
-# Imports you almost always need
-from atomic_agents.agents.base_agent import BaseAgent, BaseAgentConfig
-from atomic_agents.lib.base.base_io_schema import BaseIOSchema
-from atomic_agents.lib.base.base_tool import BaseTool, BaseToolConfig
-from atomic_agents.lib.components.system_prompt_generator import (
-    SystemPromptGenerator, SystemPromptContextProviderBase,
-)
-from atomic_agents.lib.components.agent_memory import AgentMemory
+from atomic_agents.context import BaseDynamicContextProvider
+from datetime import date
+
+class CurrentDateProvider(BaseDynamicContextProvider):
+    def get_info(self) -> str:
+        return f"Today is {date.today().isoformat()}."
+
+agent.register_context_provider("date", CurrentDateProvider(title="Current Date"))
 ```
 
-| Need | Call |
-| --- | --- |
-| Run one turn | `agent.run(input_schema_instance)` |
-| Stream a turn | `async for partial in agent.run_async(input): ...` |
-| Reset between questions | `agent.reset_memory()` |
-| Inject dynamic context | `agent.register_context_provider("name", provider)` |
-| Override response shape per-call | `agent.get_response(response_model=MyOtherSchema)` |
+The `SystemPromptGenerator` automatically appends a `# EXTRA INFORMATION AND CONTEXT` section with each registered provider's output. Canonical example: `atomic-examples/rag-chatbot/` — the retrieved chunks are surfaced via a context provider rather than crammed into the user message.
 
-That is the full surface area you need for this repo. If a request can be expressed with the atoms above, do not introduce additional frameworks (LangChain, CrewAI, AutoGen, etc.).
+## MCP integration
+
+```python
+from atomic_agents.connectors.mcp import fetch_mcp_tools_async, MCPTransportType
+
+tools = await fetch_mcp_tools_async(
+    server_url="http://localhost:8000",
+    transport_type=MCPTransportType.HTTP_STREAM,   # or STDIO, SSE
+)
+```
+
+Tools discovered over MCP plug into the same **choice-agent** pattern as local tools — they aren't autonomously invoked. Canonical example: `atomic-examples/mcp-agent/`.
+
+## Streaming
+
+| Method | Returns | Use when |
+| --- | --- | --- |
+| `agent.run(x)` | full output | default |
+| `agent.run_async(x)` | full output (awaitable) | parallel orchestration with `asyncio.gather` |
+| `agent.run_stream(x)` | sync generator of partials | CLI, progressive UI |
+| `agent.run_async_stream(x)` | async generator of partials | async server endpoints |
+
+Stream loop:
+```python
+async for partial in agent.run_async_stream(user_input):
+    render(partial)        # partial is your output schema with fields filling in
+```
+
+## Idioms — do / don't
+
+**Do**
+- One responsibility per agent. If you find yourself adding a third unrelated field to an output schema, split the agent.
+- Align schemas across handoffs. Output of A *is* input of B — refactor schemas to make this literally true, don't bridge with adapter code.
+- Keep orchestration in plain Python where you can read it, log it, and breakpoint it.
+- Use `SystemPromptGenerator(background=..., steps=..., output_instructions=...)`; treat hardcoded multi-line prompt strings as a smell.
+- Give every `BaseIOSchema` a real docstring — it becomes the LLM-visible description.
+
+**Don't**
+- Don't expect autonomous tool-calling — there is no `tools=[]` arg.
+- Don't pass raw strings to `.run()` — always a schema instance.
+- Don't build an "Orchestrator" class. The plain-Python loop *is* the orchestration.
+- Don't reach for v1 names (`BaseAgent`, `BaseAgentConfig`, `AgentMemory`, `MCPToolFactory`) when working against current docs — see translation table.
+
+## Examples worth opening (`atomic-examples/`)
+
+| Example | What it teaches |
+| --- | --- |
+| `quickstart/` | Graded intro, 4 files |
+| `orchestration-agent/` | Tool-orchestration / choice-agent pattern |
+| `deep-research/` | Sequential pipeline + shared state |
+| `rag-chatbot/` | Context provider for retrieved chunks |
+| `mcp-agent/` | STDIO / SSE / HTTP_STREAM transports |
+| `web-search-agent/` | External tool integration |
+| `fastapi-memory/` | Serving an agent + persisting history |
+| `hooks-example/` | Observability and error handling |
+| `basic-multimodal/`, `nested-multimodal/` | Image inputs |
+| `youtube-summarizer/`, `youtube-to-recipe/` | End-to-end pipelines |
+
+Browse: <https://github.com/BrainBlend-AI/atomic-agents/tree/main/atomic-examples>
+
+## v1 → v2 translation table
+
+When working in this repo (Python 3.11, pinned `atomic-agents==1.1.11`), rename as you go:
+
+| v2 (docs)                          | v1.1.x (installed here)                 |
+| ---------------------------------- | --------------------------------------- |
+| `AtomicAgent[In, Out](config=...)` | `BaseAgent(BaseAgentConfig(input_schema=In, output_schema=Out, ...))` |
+| `AgentConfig`                      | `BaseAgentConfig`                       |
+| `ChatHistory`                      | `AgentMemory`                           |
+| `from atomic_agents import ...`    | `from atomic_agents.agents.base_agent import ...` |
+| `from atomic_agents.context import SystemPromptGenerator, ChatHistory, BaseDynamicContextProvider` | `from atomic_agents.lib.components.system_prompt_generator import SystemPromptGenerator, SystemPromptContextProviderBase`<br>`from atomic_agents.lib.components.agent_memory import AgentMemory` |
+| `from atomic_agents.connectors.mcp import fetch_mcp_tools_async, MCPTransportType` | `from atomic_agents.lib.factories.mcp_tool_factory import MCPToolFactory` |
+| `agent.run_stream(x)`              | not available — use `run_async` and accumulate |
+| `agent.run_async_stream(x)`        | `agent.run_async(x)` (already streams partials) |
+| `BaseDynamicContextProvider`       | `SystemPromptContextProviderBase`       |
+
+Every pattern (orchestration, tools-don't-auto-invoke, schema chaining, context providers) is identical in spirit between v1 and v2 — only names changed.
+
+## Repo-specific note (rethinking_prompting)
+
+This skill lives in a research repo about prompting strategies under majority voting (paper: *Rethinking the Role of Prompting Strategies in LLM Test-Time Scaling*, ACL 2025). When a request asks for new strategy code here:
+
+- Default to **CoT + majority voting** (the template in `PROMPT.md`, N≈16, temperature≈0.7) — the paper's headline result is that this beats more complex strategies at scale.
+- Map strategy templates → `SystemPromptGenerator`; the LLM wrapper in `model.py` → the `instructor`-wrapped `client`; dataset rows → input schemas; `\boxed{...}` extraction → an output-schema field; majority voting → a caller-side `Counter.most_common(1)` loop *outside* the agent.
+- For iterative strategies in the codebase — **ToT, S-RF, MAD** — use the orchestration patterns above (supervisor for S-RF; parallel + judge agent for MAD; expander + evaluator for ToT). Reuse the strategy identifiers `DiP`, `CoT`, `L2M`, `SBP`, `AnP`, `ToT`, `S-RF`, `MAD` already used in `prompts/` and `scripts/`.
+- Don't add multi-agent debate or tree branching to "improve" a task unless the user explicitly asks — the paper shows complexity usually hurts at scale.
