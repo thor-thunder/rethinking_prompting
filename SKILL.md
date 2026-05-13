@@ -17,6 +17,11 @@ Four values drive every design choice: **modularity, predictability, extensibili
 
 Docs root: <https://brainblend-ai.github.io/atomic-agents/>
 
+## Green flag / Red flag
+
+- **Green flag** — One agent, one responsibility, one typed output schema. Chain agents by making agent A's output schema *literally be* agent B's input schema; refactor schemas to align rather than writing adapter code.
+- **Red flag** — Don't expect autonomous tool-calling. There is no `tools=[...]` argument anywhere in the framework. The developer decides when a tool runs; that explicit call site is the whole point.
+
 ## Version reality (read this first)
 
 | Track | API names | Python | Installable here? |
@@ -44,21 +49,31 @@ If a request can be expressed with these five, do not pull in LangChain / CrewAI
 
 ## Hello world (canonical, from the v2 quickstart)
 
+Set the local key first:
+
+```bash
+export ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY   # or paste the literal key
+```
+
 ```python
-import os, instructor, openai
+import os, instructor, anthropic
 from atomic_agents import AtomicAgent, AgentConfig, BasicChatInputSchema, BasicChatOutputSchema
 from atomic_agents.context import ChatHistory
 
 history = ChatHistory()
-client = instructor.from_openai(openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
+client = instructor.from_anthropic(
+    anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+)
 
 agent = AtomicAgent[BasicChatInputSchema, BasicChatOutputSchema](
-    config=AgentConfig(client=client, model="gpt-5-mini", history=history)
+    config=AgentConfig(client=client, model="claude-sonnet-4-6", history=history)
 )
 
 reply = agent.run(BasicChatInputSchema(chat_message="hi"))
 print(reply.chat_message)
 ```
+
+Use `instructor.from_anthropic(...)` for any Claude model; `instructor.from_openai(...)` for OpenAI; `instructor.from_litellm(...)` for everything else. The `AtomicAgent` API is identical regardless of provider.
 
 Two idioms to internalize from this snippet:
 
@@ -102,7 +117,7 @@ prompt = SystemPromptGenerator(
 )
 
 agent = AtomicAgent[QuestionInput, CoTOutput](
-    config=AgentConfig(client=client, model="gpt-5-mini",
+    config=AgentConfig(client=client, model="claude-sonnet-4-6",
                        history=ChatHistory(), system_prompt_generator=prompt)
 )
 ```
