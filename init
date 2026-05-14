@@ -1,0 +1,76 @@
+#!/bin/bash
+set -e
+
+# Initialize rethinking_prompting environment
+# Usage: ./init [--all]
+# --all: Also clone and setup atomic-agents
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARENT_DIR="$(dirname "$PROJECT_DIR")"
+
+print_section() {
+    echo -e "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "▶ $1"
+    echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+}
+
+print_success() {
+    echo -e "✓ $1\n"
+}
+
+print_step() {
+    echo "  → $1"
+}
+
+# 1. Install uv
+print_section "Installing uv (Python package manager)"
+if ! command -v uv &> /dev/null; then
+    print_step "Downloading uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    print_success "uv installed"
+else
+    print_success "uv already installed"
+fi
+
+# 2. Sync dependencies
+print_section "Syncing project dependencies"
+cd "$PROJECT_DIR"
+print_step "Running: uv sync"
+uv sync
+print_step "Running: uv pip install -r requirements.txt"
+uv pip install -r requirements.txt
+print_success "Dependencies installed"
+
+# 3. Optional: Setup atomic-agents
+if [[ "$1" == "--all" ]]; then
+    print_section "Setting up atomic-agents"
+
+    if [ ! -d "$PARENT_DIR/atomic-agents" ]; then
+        print_step "Cloning atomic-agents..."
+        cd "$PARENT_DIR"
+        git clone https://github.com/BrainBlend-AI/atomic-agents.git
+        print_success "atomic-agents cloned"
+    else
+        print_success "atomic-agents already exists"
+    fi
+
+    print_step "Syncing atomic-agents dependencies..."
+    cd "$PARENT_DIR/atomic-agents"
+    uv sync --all-packages
+    print_success "atomic-agents ready"
+fi
+
+# 4. Summary
+print_section "Setup Complete"
+echo "📂 Project directory: $PROJECT_DIR"
+echo "🐍 Python: $(python --version)"
+echo "📦 uv: $(uv --version)"
+echo ""
+echo "Next steps:"
+echo "  • See CLAUDE.md for quick reference"
+echo "  • Run: python main.py --help"
+if [[ "$1" != "--all" ]]; then
+    echo "  • For atomic-agents: ./init --all"
+fi
+echo ""
