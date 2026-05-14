@@ -1,0 +1,25 @@
+[project]
+name = "rethinking_prompting"
+version = "0.1.0"
+description = "Rethinking the Role of Prompting Strategies in LLM Test-Time Scaling"
+requires-python = ">=3.11"
+
+dependencies = [
+    "opentelemetry-proto==1.26.0",
+    "pyarrow==18.0.0",
+    "multiprocess==0.70.16",
+    "numpy==1.26.4",
+    "datasets==3.2.0",
+    "openai==1.53.0",
+    "vllm==0.8.4",
+    "protobuf==4.25.8",
+    "google-generativeai==0.7.2",
+    "openpyxl",
+    "matplotlib",
+    "huggingface-hub",
+    "tqdm",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
