@@ -77,6 +77,8 @@ Recently, scaling test-time compute on Large Language Models (LLM) has garnered 
 
 ## 🛠️ Installation 
 
+**For Claude Code sessions and quick setup:** See [CLAUDE.md](CLAUDE.md)
+
 1. Clone the repository:
 ```bash
 git clone https://github.com/MraDonkey/rethinking_prompting.git
@@ -89,6 +91,8 @@ conda create -n rethinking_prompting  python=3.11
 conda activate rethinking_prompting
 pip install -r requirements.txt
 ```
+
+**Recommended:** Use `uv` for faster dependency management (see [CLAUDE.md](CLAUDE.md))
 
 ## ⚙️ Configuration 
 
