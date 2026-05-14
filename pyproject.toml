@@ -1,0 +1,75 @@
+[project]
+name = "rethinking_prompting"
+version = "0.1.0"
+description = "Rethinking the Role of Prompting Strategies in LLM Test-Time Scaling"
+authors = [
+    { name = "Yexiang Liu", email = "yexiang.liu@example.com" },
+]
+readme = "readme.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+
+dependencies = [
+    "opentelemetry-proto==1.26.0",
+    "pyarrow==18.0.0",
+    "multiprocess==0.70.16",
+    "numpy==1.26.4",
+    "datasets==3.2.0",
+    "openai==1.53.0",
+    "vllm==0.8.4",
+    "protobuf==4.25.8",
+    "google-generativeai==0.7.2",
+    "openpyxl",
+    "matplotlib",
+    "huggingface-hub",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
+    "pytest-asyncio>=0.21",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1.0",
+    "black>=23.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "unit: unit tests",
+    "integration: integration tests",
+    "slow: slow tests",
+]
+
+[tool.coverage.run]
+source = ["dataset", "model", "main"]
+omit = [
+    "tests/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
