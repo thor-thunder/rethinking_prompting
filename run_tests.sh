@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # Test runner script for rethinking_prompting
+# See CLAUDE.md → "Run Tests" for full documentation
+#
 # Usage: ./run_tests.sh [options]
 #
 # Options:
@@ -9,6 +11,7 @@
 #   --unit          Run only unit tests
 #   --coverage      Generate HTML coverage report
 #   --watch         Watch mode (requires pytest-watch)
+#   --help          Show help message
 
 set -e
 

@@ -1,31 +1,8 @@
 # Integration with Atomic Agents
 
-This document describes how the `rethinking_prompting` project integrates with the `atomic-agents` framework.
+> ⚠️ **Start with [CLAUDE.md](CLAUDE.md) for quick navigation and essential commands**
 
-## Setup
-
-### 1. Using uv (Recommended)
-
-The project now uses `uv` for dependency management. Install uv:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 2. Sync Dependencies
-
-For `rethinking_prompting`:
-```bash
-cd /path/to/rethinking_prompting
-uv sync
-uv pip install -r requirements.txt
-```
-
-For `atomic-agents`:
-```bash
-cd /path/to/atomic-agents
-uv sync --all-packages
-```
+This document provides detailed integration information between `rethinking_prompting` and the `atomic-agents` framework.
 
 ## Project Structure
 
