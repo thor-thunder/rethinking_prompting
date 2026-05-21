@@ -105,3 +105,21 @@ The skill activates automatically (no explicit `/skill` invocation required) on:
    the report, research write-up, or article where it belongs.
 5. **Return the final response** — include the artifact plus a short note on which
    doc versions Context7 consulted.
+
+## ReAct Loop (Reason → Act → Observation)
+
+The skill executes the Workflow above as an iterative ReAct loop. Each cycle:
+
+1. **Thought** — classify the current need using the **Auto-Trigger Patterns**
+   table above, and decide which route fires next (Context7 docs, Cavans Art
+   artifact, or Gamma image placement).
+2. **Action** — invoke exactly one capability along that route, reusing the
+   Sub-Commands defined above: `ctx7 library` / `ctx7 docs` (Context7) for
+   references, `cavans render` (Figma + Mermaid) for the artifact, or
+   `gamma place` (Gamma) to embed the image.
+3. **Observation** — capture the tool result (fetched docs, validated diagram, or
+   placed image) and feed it into the next Thought.
+
+Loop until the artifact is complete and technically grounded, then emit the Final
+Response (Workflow step 5). This loop reuses — and does not restate — the
+Integrations table, Auto-Trigger Patterns, and Sub-Commands above.
